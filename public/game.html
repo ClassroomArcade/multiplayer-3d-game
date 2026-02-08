@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Multiplayer 3D Game</title>
+
+  <style>
+    body { margin: 0; overflow: hidden; background: black; font-family: Arial; }
+    canvas { display: block; }
+
+    #hud {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      color: white;
+      background: rgba(0,0,0,0.5);
+      padding: 10px;
+      border-radius: 12px;
+      z-index: 10;
+      font-size: 15px;
+    }
+
+    #logoutBtn {
+      margin-top: 8px;
+      width: 100%;
+      padding: 8px;
+      border: none;
+      border-radius: 10px;
+      background: #ff4d4d;
+      color: white;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+
+<div id="hud">
+  <div>🌐 Multiplayer Online</div>
+  <div id="userInfo">Loading...</div>
+  <button id="logoutBtn">Logout</button>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+
+<script type="module">
+import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
+import { getToken, getUser, logout } from "./firebase.js";
+
+const socket = io();
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color("#0a0f1a");
+
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// Lighting
+scene.add(new THREE.AmbientLight(0xffffff, 0.3));
+
+const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+dirLight.position.set(5, 10, 5);
+scene.add(dirLight);
+
+// Floor
+const floor = new THREE.Mesh(
+  new THREE.PlaneGeometry(200, 200),
+  new THREE.MeshStandardMaterial({ color: "#1c2333" })
+);
+floor.rotation.x = -Math.PI / 2;
+scene.add(floor);
+
+// Player mesh creation
+function createPlayerMesh(color) {
+  const geo = new THREE.CapsuleGeometry(0.4, 1.0, 6, 12);
+  const mat = new THREE.MeshStandardMaterial({ color });
+  const mesh = new THREE.Mesh(geo, mat);
+  return mesh;
+}
+
+let myPlayer = {
+  x: 0,
+  y: 0,
+  z: 0,
+  rotY: 0,
+  speed: 0.09
+};
+
+const myMesh = createPlayerMesh("#7c5cff");
+scene.add(myMesh);
+
+let players = {};
+
+// Camera controls
+let camYaw = 0;
+let camPitch = 0.2;
+let camDistance = 6;
+
+let dragging = false;
+let lastX = 0;
+let lastY = 0;
+
+document.addEventListener("mousedown", (e) => {
+  dragging = true;
+  lastX = e.clientX;
+  lastY = e.clientY;
+});
+
+document.addEventListener("mouseup", () => dragging = false);
+
+document.addEventListener("mousemove", (e) => {
+  if (!dragging) return;
+
+  const dx = e.clientX - lastX;
+  const dy = e.clientY - lastY;
+
+  camYaw -= dx * 0.005;
+  camPitch -= dy * 0.005;
+
+  camPitch = Math.max(-0.1, Math.min(1.2, camPitch));
+
+  lastX = e.clientX;
+  lastY = e.clientY;
+});
+
+// Movement
+let keys = {};
+document.addEventListener("keydown", (e) => keys[e.key.toLowerCase()] = true);
+document.addEventListener("keyup", (e) => keys[e.key.toLowerCase()] = false);
+
+// Auth check
+const user = getUser();
+if (!user) {
+  window.location.href = "/";
+}
+
+document.getElementById("userInfo").innerText = "Logged in as: " + user.email;
+
+// Logout button
+document.getElementById("logoutBtn").onclick = async () => {
+  await logout();
+  window.location.href = "/";
+};
+
+// Join server with Firebase token
+const token = await getToken();
+socket.emit("joinGame", { token });
+
+// Server events
+socket.on("joined", (data) => {
+  console.log("Joined game:", data);
+
+  // Spawn existing players
+  for (let id in data.players) {
+    if (id === socket.id) continue;
+
+    const p = data.players[id];
+    const mesh = createPlayerMesh("#ff4d4d");
+    mesh.position.set(p.x, p.y, p.z);
+    scene.add(mesh);
+
+    players[id] = { mesh };
+  }
+});
+
+socket.on("playerJoined", (p) => {
+  const mesh = createPlayerMesh("#ff4d4d");
+  mesh.position.set(p.x, p.y, p.z);
+  scene.add(mesh);
+
+  players[p.id] = { mesh };
+});
+
+socket.on("playerMoved", (p) => {
+  if (!players[p.id]) return;
+
+  players[p.id].mesh.position.set(p.x, p.y, p.z);
+  players[p.id].mesh.rotation.y = p.rotY;
+});
+
+socket.on("playerLeft", (id) => {
+  if (!players[id]) return;
+  scene.remove(players[id].mesh);
+  delete players[id];
+});
+
+// Movement update
+function updateMovement() {
+  let mx = 0;
+  let mz = 0;
+
+  if (keys["w"]) mz -= 1;
+  if (keys["s"]) mz += 1;
+  if (keys["a"]) mx -= 1;
+  if (keys["d"]) mx += 1;
+
+  let len = Math.sqrt(mx * mx + mz * mz);
+  if (len > 0) {
+    mx /= len;
+    mz /= len;
+  }
+
+  let sin = Math.sin(camYaw);
+  let cos = Math.cos(camYaw);
+
+  let dx = (mx * cos - mz * sin) * myPlayer.speed;
+  let dz = (mx * sin + mz * cos) * myPlayer.speed;
+
+  myPlayer.x += dx;
+  myPlayer.z += dz;
+
+  if (len > 0) {
+    myPlayer.rotY = Math.atan2(dx, dz);
+  }
+
+  myMesh.position.set(myPlayer.x, myPlayer.y, myPlayer.z);
+  myMesh.rotation.y = myPlayer.rotY;
+
+  socket.emit("playerMove", {
+    x: myPlayer.x,
+    y: myPlayer.y,
+    z: myPlayer.z,
+    rotY: myPlayer.rotY
+  });
+}
+
+function updateCamera() {
+  const target = new THREE.Vector3(myPlayer.x, 1.2, myPlayer.z);
+
+  const offsetX = Math.sin(camYaw) * camDistance;
+  const offsetZ = Math.cos(camYaw) * camDistance;
+
+  camera.position.x = target.x + offsetX;
+  camera.position.z = target.z + offsetZ;
+  camera.position.y = target.y + camDistance * Math.sin(camPitch);
+
+  camera.lookAt(target);
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+
+  updateMovement();
+  updateCamera();
+
+  renderer.render(scene, camera);
+}
+
+animate();
+
+window.addEventListener("resize", () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+
+</body>
+</html>
